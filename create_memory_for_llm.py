@@ -8,7 +8,7 @@ from langchain_community.vectorstores import FAISS
 #load_dotenv(find_dotenv())
 
 
-# Step 1: Load raw PDF(s)
+# Step 1: Load source banking compliance PDF(s)
 DATA_PATH="data/"
 def load_pdf_files(data):
     loader = DirectoryLoader(data,
@@ -22,7 +22,7 @@ documents=load_pdf_files(data=DATA_PATH)
 #print("Length of PDF pages: ", len(documents))
 
 
-# Step 2: Create Chunks
+# Step 2: Create chunks
 def create_chunks(extracted_data):
     text_splitter=RecursiveCharacterTextSplitter(chunk_size=500,
                                                  chunk_overlap=50)
@@ -32,7 +32,7 @@ def create_chunks(extracted_data):
 text_chunks=create_chunks(extracted_data=documents)
 #print("Length of Text Chunks: ", len(text_chunks))
 
-# Step 3: Create Vector Embeddings 
+# Step 3: Create vector embeddings
 
 def get_embedding_model():
     embedding_model=HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
