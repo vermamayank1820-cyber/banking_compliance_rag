@@ -1,190 +1,215 @@
 # Banking Compliance RAG Assistant
 
-This project is a Retrieval-Augmented Generation (RAG) application for banking compliance documents. It lets users upload one or more PDF files, index them into a FAISS vector store, and ask grounded questions through a Streamlit chat interface.
+A Retrieval-Augmented Generation (RAG) application for banking compliance documents.
+Upload PDFs, ask grounded questions — answers come strictly from your documents.
 
-## Overview
+---
 
-The application uses:
+## System Architecture
 
-- `Streamlit` for the UI
-- `LangChain` for retrieval orchestration
-- `FAISS` for local vector storage
-- `sentence-transformers/all-MiniLM-L6-v2` for embeddings
-- `Groq` with `llama-3.1-8b-instant` for answer generation
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        BANKING COMPLIANCE RAG                           │
+├──────────────┬──────────────────────────────┬───────────────────────────┤
+│   INGESTION  │         RETRIEVAL             │       GENERATION          │
+│              │                              │                           │
+│  PDF Upload  │   Query Expansion (HyDE)     │   Groq LLM                │
+│      ↓       │          ↓                   │   llama-3.1-8b-instant    │
+│  PyPDFLoader │   Multi-Query Variants       │          ↑                │
+│      ↓       │          ↓                   │   Prompt Template         │
+│  Text Chunks │   FAISS Vector Search        │   (context + history)     │
+│  (800/150)   │          ↓                   │          ↑                │
+│      ↓       │   L2 → Cosine Score          │   Top-K Chunks            │
+│  Embeddings  │          ↓                   │   (threshold ≥ 0.20)      │
+│  (MiniLM)    │   Threshold Filter           │                           │
+│      ↓       │          ↓                   │   Fallback:               │
+│  FAISS Index │   Source Citations           │   "Hey, sorry I don't     │
+│  (local)     │                              │    know the answer..."    │
+└──────────────┴──────────────────────────────┴───────────────────────────┘
+```
 
-The assistant is configured to answer only from the uploaded document context. If the answer is not present in the indexed content, it responds with `I do not know.`
-
-## Features
-
-- Upload a single PDF or multiple PDFs
-- Store uploaded PDFs in the local `data/` folder
-- Rebuild the FAISS knowledge base from the uploaded files
-- Ask banking compliance questions in a chat UI
-- Show retrieved source document names and page numbers
-- Replace existing PDFs when you want a clean knowledge base
+---
 
 ## Project Structure
 
-```text
+```
 Banking Compliance/
-├── medibot.py
-├── create_memory_for_llm.py
-├── connect_memory_with_llm.py
+│
+├── medibot.py                  # Streamlit app — entry point
+├── config.py                   # All tuneable constants (single source of truth)
+├── create_memory_for_llm.py    # CLI: rebuild vector store from data/
+├── connect_memory_with_llm.py  # CLI: local test with HuggingFace pipeline
 ├── requirements.txt
-├── data/
+├── .env                        # GROQ_API_KEY (not committed)
+│
+├── services/
+│   ├── ingestion.py            # PDF loading, chunking, FAISS build/update
+│   ├── retrieval.py            # Score-aware retrieval + multi-query merge
+│   └── audit.py                # Append-only JSONL governance log
+│
+├── data/                       # Uploaded PDFs (persisted)
 │   └── *.pdf
-└── vectorstore/
-    └── db_faiss/
-        ├── index.faiss
-        └── index.pkl
+│
+├── vectorstore/
+│   ├── db_faiss/               # FAISS index files
+│   │   ├── index.faiss
+│   │   └── index.pkl
+│   └── registry.json           # Document index (hash, chunk count, timestamp)
+│
+└── logs/
+    └── audit.jsonl             # Governance / audit trail
 ```
 
-## Main Files
+---
 
-### `medibot.py`
+## Component Responsibilities
 
-Primary Streamlit application.
+### `medibot.py` — Application Layer
+- Streamlit chat UI with sidebar document management
+- Passes conversation history (last 6 turns) to the LLM as secondary context
+- Coordinates ingestion, retrieval, and answer generation
+- Renders source citations with relevance scores per answer
 
-Responsibilities:
+### `config.py` — Configuration
+- Single file for all tuneable constants: chunk size, overlap, similarity threshold, model names, paths
+- Change retrieval or model behaviour here without touching service code
 
-- renders the banking compliance chat UI
-- supports inline PDF upload through the `+` control
-- saves PDFs into `data/`
-- rebuilds the FAISS vector database
-- loads the vector store and runs retrieval QA
-- displays answers with supporting source references
+### `services/ingestion.py` — Ingestion Service
+- Loads PDFs with `PyPDFLoader`, enriches chunk metadata (filename, page, table flag, timestamp)
+- Incremental indexing: MD5 hash comparison skips unchanged files
+- Force-rebuild replaces the entire index from scratch
+- Optional `pdfplumber` table detection — degrades gracefully if not installed
 
-### `create_memory_for_llm.py`
+### `services/retrieval.py` — Retrieval Service
+- Converts raw FAISS L2 distances to cosine similarity scores `[0, 1]`
+- Single-query and multi-query (deduplicated, best-score merge) retrieval modes
+- Returns `(chunks, above_threshold, max_score)` — caller decides on fallback
 
-Standalone ingestion script that:
+### `services/audit.py` — Audit Service
+- Append-only JSONL log at `logs/audit.jsonl`
+- Logs: uploads, indexing events, questions asked (truncated to 200 chars), answers with confidence scores
+- Deliberately excludes raw document text and full session data
 
-- loads all PDFs from `data/`
-- splits them into chunks
-- creates embeddings
-- saves the FAISS index into `vectorstore/db_faiss`
+---
 
-Use this when you want to rebuild the vector store manually outside the UI.
+## Data Flow
 
-### `connect_memory_with_llm.py`
+### Ingestion (one-time or on upload)
 
-Standalone retrieval script for local testing with a Hugging Face text-generation pipeline instead of the Streamlit app.
+```
+PDF file(s)
+    └─▶ PyPDFLoader          — extract raw text per page
+         └─▶ pdfplumber      — detect table pages (optional)
+              └─▶ RecursiveCharacterTextSplitter  — chunk (800 chars / 150 overlap)
+                   └─▶ HuggingFaceEmbeddings      — embed each chunk (MiniLM)
+                        └─▶ FAISS.save_local()    — persist index + registry
+```
 
-## How It Works
+### Query (per user message)
 
-### 1. Document ingestion
+```
+User question
+    ├─▶ HyDE               — generate hypothetical compliance passage (optional)
+    ├─▶ Multi-Query        — 3 synonym-rephrased variants (optional)
+    └─▶ retrieve_multi_query()
+             └─▶ FAISS similarity search (per query variant)
+                  └─▶ L2 → cosine score, dedup by content hash
+                       └─▶ threshold filter (≥ 0.20)
+                            ├── below threshold → "Hey, sorry I don't know..."
+                            └── above threshold → build context string
+                                     └─▶ PromptTemplate
+                                          (context + conversation history)
+                                               └─▶ Groq LLM → answer + citations
+```
 
-PDFs are read from the `data/` directory using `PyPDFLoader`.
+---
 
-### 2. Text chunking
+## Modern RAG Techniques
 
-Documents are split with:
+| Technique | Purpose | Config flag |
+|---|---|---|
+| **HyDE** | Generates a hypothetical doc excerpt to bridge vocabulary gaps between user phrasing and document language | `USE_HYDE = True` |
+| **Multi-Query** | Rephrases the question 3 ways with regulatory synonyms to widen recall | `USE_MULTI_QUERY = True` |
+| **Score-aware retrieval** | L2 → cosine conversion gives a calibrated `[0, 1]` score; threshold filters noise | `SIMILARITY_THRESHOLD = 0.20` |
+| **Incremental indexing** | MD5 hash check skips unchanged PDFs on re-upload | always on |
+| **Conversation history** | Last 6 turns injected into prompt as secondary context for follow-up awareness | always on |
 
-- chunk size: `500`
-- chunk overlap: `50`
+---
 
-### 3. Embedding generation
+## Key Configuration (`config.py`)
 
-Each chunk is embedded using:
+| Parameter | Default | Description |
+|---|---|---|
+| `CHUNK_SIZE` | `800` | Characters per text chunk |
+| `CHUNK_OVERLAP` | `150` | Overlap between adjacent chunks |
+| `SIMILARITY_THRESHOLD` | `0.20` | Minimum cosine score to treat a chunk as relevant |
+| `TOP_K` | `5` | Max chunks retrieved per query |
+| `MULTI_QUERY_COUNT` | `3` | Number of rephrased query variants |
+| `LLM_MODEL` | `llama-3.1-8b-instant` | Groq model for answer generation |
+| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | HuggingFace sentence-transformer |
 
-- `sentence-transformers/all-MiniLM-L6-v2`
-
-### 4. Vector storage
-
-Embeddings are stored locally in FAISS under:
-
-- `vectorstore/db_faiss`
-
-### 5. Retrieval and answer generation
-
-When a user asks a question:
-
-- top `3` relevant chunks are retrieved
-- the retrieved context is passed to the Groq LLM
-- the assistant answers only from that context
+---
 
 ## Setup
 
-### Prerequisites
-
-- Python 3.10+
-- a Groq API key
-
-### Install dependencies
+**Prerequisites:** Python 3.10+, a Groq API key
 
 ```bash
+# Install dependencies
 pip install -r requirements.txt
-```
 
-### Configure environment
+# Configure environment
+echo "GROQ_API_KEY=your_key_here" > .env
 
-Create a `.env` file in the project root:
-
-```env
-GROQ_API_KEY=your_groq_api_key_here
-```
-
-You can also provide the key through Streamlit secrets.
-
-## Running the App
-
-Start the Streamlit UI:
-
-```bash
+# Run the app
 streamlit run medibot.py
 ```
 
-Then:
-
-1. Open the app in your browser.
-2. Use the `+` button to upload one or more banking compliance PDFs.
-3. Click `Save and Rebuild`.
-4. Ask questions in the bottom chat bar.
-
-## Manual Vector Store Rebuild
-
-If you want to rebuild the vector database from the existing files in `data/`, run:
+**Or rebuild the vector store from the CLI:**
 
 ```bash
 python create_memory_for_llm.py
 ```
 
-## Usage Notes
+---
 
-- The app supports both single-PDF and multi-PDF workflows.
-- Uploaded PDFs are persisted in `data/`.
-- The vector store is persisted in `vectorstore/db_faiss`.
-- If you upload a new set of documents and want to remove the old set, use `Replace existing PDFs`.
-- If the vector store is missing, the app will prompt you to upload PDFs and rebuild the knowledge base.
+## Answer Behaviour
 
-## Current Retrieval Prompt Behavior
+| Situation | Response |
+|---|---|
+| Answer found in retrieved chunks | Direct, citation-backed answer |
+| Follow-up question | Uses conversation history (last 6 turns) + retrieved context |
+| No chunks above threshold | `"Hey, sorry I don't know the answer to this."` |
+| No knowledge base loaded | `"Hey, sorry I don't know the answer to this."` |
 
-The assistant is instructed to:
-
-- behave as a banking compliance assistant
-- use only the provided context
-- avoid inventing regulatory or compliance guidance
-- answer concisely
-
-## Limitations
-
-- The quality of answers depends on the uploaded PDFs.
-- This is a document-grounded assistant, not a live regulatory feed.
-- It does not validate whether a document is current, legally binding, or jurisdiction-specific.
-- Streamlit layout customization is limited, so the modern chat-style UI is implemented with custom layout and CSS adjustments.
+---
 
 ## Example Questions
 
-- What is the Basel II framework?
+- What is the Basel III leverage ratio?
 - What is a credit conversion factor?
 - How are off-balance-sheet exposures treated?
-- What does the leverage ratio cover?
+- What are the CET1 capital buffer requirements?
+- Explain more. *(follow-up — uses conversation history)*
 
-## Future Improvements
+---
 
-- automatic stale-index detection
-- document removal from the UI
-- source snippet highlighting
-- better metadata display
-- support for additional document formats
-- stronger compliance-specific prompt templates
+## Limitations
 
+- Answer quality depends entirely on the uploaded PDFs
+- Not a live regulatory feed — documents must be manually updated
+- Does not validate whether a document is current, legally binding, or jurisdiction-specific
+- No user authentication or multi-tenant isolation
+
+---
+
+## Roadmap
+
+| Phase | Feature |
+|---|---|
+| 2 | Hybrid search (vector + BM25 keyword) for exact regulatory term matching |
+| 2 | Metadata filtering by document type, jurisdiction, effective date |
+| 3 | Saved query history and user feedback mechanism |
+| 3 | Exportable audit trails for regulatory examinations |
+| 4 | Automated ingestion from regulatory RSS feeds |
+| 4 | Scanned PDF support (OCR) and structured regulatory XML |

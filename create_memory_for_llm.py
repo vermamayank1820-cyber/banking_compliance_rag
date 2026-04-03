@@ -1,46 +1,38 @@
-from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
+"""
+create_memory_for_llm.py
+────────────────────────
+Standalone script to (re)build the FAISS vector store from all PDFs in data/.
 
-## Uncomment the following files if you're not using pipenv as your virtual environment manager
-#from dotenv import load_dotenv, find_dotenv
-#load_dotenv(find_dotenv())
+Usage:
+    python create_memory_for_llm.py
 
+All tuneable parameters (chunk size, overlap, paths, embedding model) are
+controlled via config.py.  The heavy lifting is done by services/ingestion.py
+so this script stays in sync with the in-app rebuild logic automatically.
+"""
 
-# Step 1: Load source banking compliance PDF(s)
-DATA_PATH="data/"
-def load_pdf_files(data):
-    loader = DirectoryLoader(data,
-                             glob='*.pdf',
-                             loader_cls=PyPDFLoader)
-    
-    documents=loader.load()
-    return documents
+from pathlib import Path
+from config import DATA_PATH, DB_FAISS_PATH
+from services import ingestion
 
-documents=load_pdf_files(data=DATA_PATH)
-#print("Length of PDF pages: ", len(documents))
+def main():
+    data_dir = Path(DATA_PATH)
+    pdf_files = sorted(data_dir.glob("*.pdf"))
 
+    if not pdf_files:
+        print(f"No PDF files found in '{DATA_PATH}'. Add PDFs and re-run.")
+        return
 
-# Step 2: Create chunks
-def create_chunks(extracted_data):
-    text_splitter=RecursiveCharacterTextSplitter(chunk_size=500,
-                                                 chunk_overlap=50)
-    text_chunks=text_splitter.split_documents(extracted_data)
-    return text_chunks
+    print(f"Found {len(pdf_files)} PDF(s): {[p.name for p in pdf_files]}")
+    print("Building vector store (force_rebuild=True)…")
 
-text_chunks=create_chunks(extracted_data=documents)
-#print("Length of Text Chunks: ", len(text_chunks))
+    result = ingestion.build_vectorstore(pdf_files, force_rebuild=True)
 
-# Step 3: Create vector embeddings
+    print(f"\nDone.")
+    print(f"  Indexed : {result['indexed']}")
+    print(f"  Skipped : {result['skipped']}")
+    print(f"  Chunks  : {result['total_new_chunks']}")
+    print(f"\nVector store saved to: {DB_FAISS_PATH}")
 
-def get_embedding_model():
-    embedding_model=HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    return embedding_model
-
-embedding_model=get_embedding_model()
-
-# Step 4: Store embeddings in FAISS
-DB_FAISS_PATH="vectorstore/db_faiss"
-db=FAISS.from_documents(text_chunks, embedding_model)
-db.save_local(DB_FAISS_PATH)
+if __name__ == "__main__":
+    main()

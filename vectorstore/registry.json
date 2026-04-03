@@ -1,0 +1,65 @@
+{
+  "basel_framework.pdf": {
+    "hash": "081e420418a359578cbed344b92a219a",
+    "indexed_at": "2026-04-02T19:58:05.591770+00:00",
+    "chunk_count": 360,
+    "page_count": 77,
+    "status": "indexed"
+  },
+  "MRM - OCC Guidelines.pdf": {
+    "hash": "91417882531dd643487a6101e6d62e7b",
+    "indexed_at": "2026-04-03T09:29:21.876109+00:00",
+    "chunk_count": 459,
+    "page_count": 109,
+    "status": "indexed"
+  },
+  "Naeem Siddiqi - Credit Risk Scorecards_ Developing and Implementing Intelligent Credit Scoring (Wiley and SAS Business Series) (2005).pdf": {
+    "hash": "1c217da737904845c55d9e2a75d8948f",
+    "indexed_at": "2026-04-03T09:29:23.020266+00:00",
+    "chunk_count": 617,
+    "page_count": 210,
+    "status": "indexed"
+  },
+  "WOE and IV.pdf": {
+    "hash": "ba77599ffabe8e6883c2b5df0b4f243b",
+    "indexed_at": "2026-04-03T09:29:23.169583+00:00",
+    "chunk_count": 19,
+    "page_count": 8,
+    "status": "indexed"
+  },
+  "bcbs_wp14.pdf": {
+    "hash": "40c9e8781c7c359262e6fbe4bb56b777",
+    "indexed_at": "2026-04-03T09:29:23.821937+00:00",
+    "chunk_count": 484,
+    "page_count": 120,
+    "status": "indexed"
+  },
+  "bcbsca05.pdf": {
+    "hash": "74b034918adcd04be2e85f4c2c23ba96",
+    "indexed_at": "2026-04-03T09:29:24.928306+00:00",
+    "chunk_count": 546,
+    "page_count": 108,
+    "status": "indexed"
+  },
+  "pub-ch-rating-credit-risk.pdf": {
+    "hash": "0f6aed8d8bb2e44a4317af43de89e6b0",
+    "indexed_at": "2026-04-03T09:29:25.542988+00:00",
+    "chunk_count": 228,
+    "page_count": 69,
+    "status": "indexed"
+  },
+  "sr1107a1.pdf": {
+    "hash": "35b12ef63ba3cc081832a920386e7093",
+    "indexed_at": "2026-04-03T09:29:25.801172+00:00",
+    "chunk_count": 106,
+    "page_count": 21,
+    "status": "indexed"
+  },
+  "wp0759.pdf": {
+    "hash": "de83acb804e84d011c67764a8950c4c8",
+    "indexed_at": "2026-04-03T09:29:26.139450+00:00",
+    "chunk_count": 312,
+    "page_count": 76,
+    "status": "indexed"
+  }
+}
