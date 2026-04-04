@@ -17,19 +17,136 @@ What we log (and what we deliberately don't):
   ✗ Full user sessions  — only individual events
 """
 
+import dataclasses
 import json
-from datetime import datetime, timezone
+import math
+from collections.abc import Mapping
+from datetime import date, datetime, time, timezone
+from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from config import AUDIT_LOG_PATH, MAX_AUDIT_DISPLAY
 
 
+def safe_serialize(obj: Any, _seen: set[int] | None = None) -> Any:
+    """
+    Convert arbitrary Python objects into JSON-safe values without flattening
+    all unknown types to plain strings.
+
+    Rules:
+    - Preserve native JSON primitives as-is
+    - Convert datetime/date/time to ISO 8601 strings
+    - Convert mappings and sequences recursively
+    - Convert dataclasses and pydantic-style objects to structured dicts
+    - Convert enums to their underlying value
+    - Convert Path to string
+    - Convert bytes safely to UTF-8 text when possible
+    - Fall back to a typed repr payload for unsupported objects
+    - Protect against circular references
+    """
+    if _seen is None:
+        _seen = set()
+
+    if obj is None or isinstance(obj, (bool, int, str)):
+        return obj
+
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else str(obj)
+
+    if isinstance(obj, (datetime, date, time)):
+        return obj.isoformat()
+
+    if isinstance(obj, Path):
+        return str(obj)
+
+    if isinstance(obj, Enum):
+        return safe_serialize(obj.value, _seen)
+
+    if isinstance(obj, bytes):
+        try:
+            return obj.decode("utf-8")
+        except UnicodeDecodeError:
+            return {
+                "__type__": "bytes",
+                "encoding": "utf-8",
+                "value": obj.decode("utf-8", errors="replace"),
+            }
+
+    obj_id = id(obj)
+    if obj_id in _seen:
+        return {"__type__": type(obj).__name__, "__circular__": True}
+
+    if isinstance(obj, Mapping):
+        _seen.add(obj_id)
+        try:
+            return {
+                str(key): safe_serialize(value, _seen)
+                for key, value in obj.items()
+            }
+        finally:
+            _seen.discard(obj_id)
+
+    if isinstance(obj, (list, tuple, set, frozenset)):
+        _seen.add(obj_id)
+        try:
+            return [safe_serialize(item, _seen) for item in obj]
+        finally:
+            _seen.discard(obj_id)
+
+    if dataclasses.is_dataclass(obj):
+        _seen.add(obj_id)
+        try:
+            return safe_serialize(dataclasses.asdict(obj), _seen)
+        finally:
+            _seen.discard(obj_id)
+
+    model_dump = getattr(obj, "model_dump", None)
+    if callable(model_dump):
+        _seen.add(obj_id)
+        try:
+            return safe_serialize(model_dump(), _seen)
+        finally:
+            _seen.discard(obj_id)
+
+    dict_method = getattr(obj, "dict", None)
+    if callable(dict_method):
+        _seen.add(obj_id)
+        try:
+            return safe_serialize(dict_method(), _seen)
+        finally:
+            _seen.discard(obj_id)
+
+    obj_dict = getattr(obj, "__dict__", None)
+    if isinstance(obj_dict, dict) and obj_dict:
+        _seen.add(obj_id)
+        try:
+            public_fields = {
+                key: value
+                for key, value in obj_dict.items()
+                if not key.startswith("_")
+            }
+            if public_fields:
+                return {
+                    "__type__": type(obj).__name__,
+                    "fields": safe_serialize(public_fields, _seen),
+                }
+        finally:
+            _seen.discard(obj_id)
+
+    return {
+        "__type__": type(obj).__name__,
+        "__repr__": repr(obj),
+    }
+
+
 def _write(event: dict) -> None:
-    event["timestamp"] = datetime.now(timezone.utc).isoformat()
+    record = dict(event)
+    record["timestamp"] = datetime.now(timezone.utc).isoformat()
+    serialized = safe_serialize(record)
     Path(AUDIT_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
     with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(event) + "\n")
+        fh.write(json.dumps(serialized, ensure_ascii=False) + "\n")
 
 
 # ─── Public log helpers ───────────────────────────────────────────────────────

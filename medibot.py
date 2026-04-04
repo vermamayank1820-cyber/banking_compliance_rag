@@ -22,7 +22,7 @@ from langchain_groq import ChatGroq
 
 from config import (
     AUDIT_LOG_PATH, DATA_PATH, DB_FAISS_PATH,
-    LLM_MODEL, MAX_AUDIT_DISPLAY, MULTI_QUERY_COUNT,
+    LLM_MODEL, MULTI_QUERY_COUNT,
     REGISTRY_PATH, SIMILARITY_THRESHOLD, USE_HYDE, USE_MULTI_QUERY,
 )
 from services import audit, ingestion, retrieval
@@ -295,7 +295,6 @@ def _render_sidebar() -> str | None:
             st.metric("Docs", len(registry), label_visibility="visible")
 
         st.caption(f"Model: `{LLM_MODEL}`")
-        st.caption(f"Threshold: `{SIMILARITY_THRESHOLD}`")
 
         if registry:
             last_ts = max(v.get("indexed_at", "") for v in registry.values())
@@ -378,32 +377,6 @@ def _render_sidebar() -> str | None:
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Rebuild failed: {exc}")
-
-        st.divider()
-
-        # ── Audit log ──────────────────────────────────────────────────────
-        with st.expander("Audit Log", expanded=False):
-            logs = audit.get_recent_logs(MAX_AUDIT_DISPLAY)
-            if not logs:
-                st.caption("No events recorded yet.")
-            for entry in logs:
-                ts = entry.get("timestamp", "")[:19].replace("T", " ")
-                event = entry.get("event", "")
-                st.caption(f"`{ts}` **{event}**")
-                if event == "question_asked":
-                    st.caption(f"  ↳ {entry.get('question', '')[:80]}")
-                elif event == "answer_generated":
-                    st.caption(
-                        f"  ↳ score: {entry.get('max_confidence', 'n/a')} | "
-                        f"sources: {len(entry.get('sources', []))}"
-                    )
-                elif event == "no_answer":
-                    st.caption(f"  ↳ reason: {entry.get('reason', '')}")
-                elif event == "indexing_complete":
-                    st.caption(
-                        f"  ↳ {len(entry.get('indexed', []))} indexed, "
-                        f"{entry.get('chunk_count', 0)} chunks"
-                    )
 
     return filter_filename
 
