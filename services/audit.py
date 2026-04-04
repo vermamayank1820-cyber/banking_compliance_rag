@@ -20,6 +20,7 @@ What we log (and what we deliberately don't):
 import dataclasses
 import json
 import math
+import numbers
 from collections.abc import Mapping
 from datetime import date, datetime, time, timezone
 from enum import Enum
@@ -54,6 +55,13 @@ def safe_serialize(obj: Any, _seen: set[int] | None = None) -> Any:
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else str(obj)
 
+    if isinstance(obj, numbers.Integral):
+        return int(obj)
+
+    if isinstance(obj, numbers.Real):
+        value = float(obj)
+        return value if math.isfinite(value) else str(value)
+
     if isinstance(obj, (datetime, date, time)):
         return obj.isoformat()
 
@@ -72,6 +80,20 @@ def safe_serialize(obj: Any, _seen: set[int] | None = None) -> Any:
                 "encoding": "utf-8",
                 "value": obj.decode("utf-8", errors="replace"),
             }
+
+    item_method = getattr(obj, "item", None)
+    if callable(item_method):
+        try:
+            return safe_serialize(item_method(), _seen)
+        except Exception:
+            pass
+
+    tolist_method = getattr(obj, "tolist", None)
+    if callable(tolist_method):
+        try:
+            return safe_serialize(tolist_method(), _seen)
+        except Exception:
+            pass
 
     obj_id = id(obj)
     if obj_id in _seen:
