@@ -44,7 +44,7 @@ def _l2_to_cosine(l2_distance: float) -> float:
     We clamp to [0, 1] to handle minor floating-point deviations from
     unit norm (which would otherwise yield scores just outside that range).
     """
-    cosine = 1.0 - (l2_distance ** 2) / 2.0
+    cosine = 1.0 - (float(l2_distance) ** 2) / 2.0
     return max(0.0, min(1.0, cosine))
 
 

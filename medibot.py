@@ -11,6 +11,7 @@ Architecture:
 """
 
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -73,6 +74,94 @@ _MULTI_QUERY_PROMPT_TEMPLATE = """You are a banking compliance expert. Rephrase 
 Original question: {question}
 
 Rephrased questions:"""
+
+# Contextualisation: turn a referential follow-up into a self-contained query
+# so HyDE and multi-query work against the correct topic.
+_CONTEXTUALIZE_PROMPT_TEMPLATE = """You are a banking compliance assistant. Given the conversation history and a follow-up question, rewrite the follow-up as a fully standalone, specific question that can be used to search a compliance document database. Preserve the intent and include the exact topic from the conversation.
+
+Conversation History:
+{history}
+
+Follow-up Question: {question}
+
+Standalone Question (one sentence, topic-specific):"""
+
+
+# ─── Social / trivial query guard ────────────────────────────────────────────
+# Queries in this set are pure conversational acknowledgements with no
+# information need — running them through the RAG pipeline would return
+# false-positive compliance chunks (multi-query expands them into banking
+# questions and HyDE generates banking boilerplate).
+_TRIVIAL_INPUTS: frozenset[str] = frozenset({
+    "ok", "okay", "sure", "thanks", "thank you", "got it", "i see",
+    "understood", "alright", "great", "nice", "cool", "wow", "perfect",
+    "that makes sense", "makes sense", "interesting", "is it", "really",
+    "okay thanks", "ok thanks", "okay thank you", "good", "right",
+    "sounds good", "awesome", "noted", "yes", "no", "yep", "nope",
+    "i understand", "i got it", "oh i see",
+})
+
+
+def _is_trivial_query(question: str) -> bool:
+    """Return True for social/acknowledgement inputs that don't need retrieval."""
+    clean = re.sub(r"[^a-z\s]", " ", question.lower())
+    clean = " ".join(clean.split())
+    return clean in _TRIVIAL_INPUTS
+
+
+# ─── Follow-up query contextualization ───────────────────────────────────────
+_FOLLOW_UP_MARKERS: frozenset[str] = frozenset({
+    "explain", "elaborate", "more", "detail", "brief", "briefly", "short",
+    "summarize", "summarise", "why", "how", "example", "give", "tell",
+    "describe", "expand", "clarify", "points", "further", "elaborate",
+})
+
+_REFERENTIAL_WORDS: frozenset[str] = frozenset({
+    "it", "them", "they", "these", "those", "this", "that",
+})
+
+
+def _needs_contextualization(question: str) -> bool:
+    """True when the question is too vague to retrieve without conversation context."""
+    words = question.lower().split()
+    has_marker = any(w in _FOLLOW_UP_MARKERS for w in words)
+    has_ref = any(w in _REFERENTIAL_WORDS for w in words)
+    # Short follow-up with an explicit action/elaboration word
+    if len(words) <= 6 and has_marker:
+        return True
+    # Uses referential pronouns — depends on prior context
+    if has_ref and len(words) <= 8:
+        return True
+    # Single-word command (e.g. "summarize", "why")
+    return len(words) == 1
+
+
+def _make_standalone_query(question: str, conversation_history: list) -> str:
+    """
+    Reformulate a follow-up question into a standalone, topic-specific query
+    using the recent conversation history.  Returns the original question
+    unchanged when it is already self-contained or there is no history.
+    """
+    if not conversation_history or not _needs_contextualization(question):
+        return question
+
+    history_str = "\n".join(
+        f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content'][:300]}"
+        for msg in conversation_history[-4:]
+    )
+
+    try:
+        prompt = PromptTemplate(
+            template=_CONTEXTUALIZE_PROMPT_TEMPLATE,
+            input_variables=["history", "question"],
+        )
+        chain = prompt | _build_llm() | StrOutputParser()
+        result = chain.invoke({"history": history_str, "question": question})
+        # Take only the first line in case the LLM returns extra text
+        standalone = result.strip().split("\n")[0].strip()
+        return standalone if standalone else question
+    except Exception:
+        return question
 
 
 # ─── Modern RAG helpers ───────────────────────────────────────────────────────
@@ -147,21 +236,38 @@ def answer_question(
         audit.log_no_answer(question, "no_vectorstore")
         return "Hey, sorry I don't know the answer to this.", [], 0.0
 
+    # Guard: social/trivial messages don't need retrieval and would otherwise
+    # trigger false-positive compliance answers via multi-query expansion.
+    if _is_trivial_query(question):
+        return "You're welcome! Feel free to ask any banking compliance questions.", [], 0.0
+
     audit.log_question(question, filter_filename)
 
-    # ── Modern RAG: build a richer set of query strings ────────────────────
-    # Start with the original question, then optionally add a HyDE hypothetical
-    # passage and multi-query variants.  retrieve_multi_query() deduplicates and
-    # returns the best-scoring unique chunks across all query embeddings.
-    queries: list[str] = [question]
+    # ── Step 1: Reformulate follow-up questions into standalone queries ────
+    # "can you explain more about it" → "Can you explain the Internal Ratings
+    #  Framework in more detail?" — this keeps HyDE and multi-query on topic.
+    search_query = _make_standalone_query(question, conversation_history or [])
+
+    # ── Step 2: Pre-flight relevance check ────────────────────────────────
+    # Run the standalone query against the index before paying for HyDE /
+    # multi-query LLM calls.  If the raw score is below the noise floor the
+    # topic is likely outside the corpus; HyDE would hallucinate banking text
+    # that finds false-positive chunks rather than genuine answers.
+    _, _, pre_score = retrieval.retrieve(db, search_query, filter_filename=filter_filename)
+    if pre_score < 0.15:
+        audit.log_no_answer(question, f"off_topic (pre_score={pre_score:.3f})")
+        return "Hey, sorry I don't know the answer to this.", [], pre_score
+
+    # ── Step 3: Build expanded query set using the standalone search query ─
+    queries: list[str] = [search_query]
 
     if USE_HYDE:
-        hyde_passage = _generate_hyde_query(question)
+        hyde_passage = _generate_hyde_query(search_query)
         if hyde_passage:
             queries.append(hyde_passage)
 
     if USE_MULTI_QUERY:
-        variants = _expand_query(question)
+        variants = _expand_query(search_query)
         queries.extend(variants)
 
     if len(queries) > 1:
@@ -170,7 +276,7 @@ def answer_question(
         )
     else:
         relevant, above_threshold, max_score = retrieval.retrieve(
-            db, question, filter_filename=filter_filename
+            db, search_query, filter_filename=filter_filename
         )
 
     if not above_threshold or not relevant:
